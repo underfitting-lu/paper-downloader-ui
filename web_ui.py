@@ -108,127 +108,428 @@ def index() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Paper Downloader</title>
+  <title>Paper Downloader · Ink Glass</title>
   <style>
     :root {
-      --bg: #f4f6fb;
-      --card: #ffffff;
-      --text: #172033;
-      --muted: #5d6a85;
-      --accent: #0f6cff;
-      --border: #d9e0f0;
+      --bg-ink: #0f151c;
+      --bg-paper: #d7d9dc;
+      --glass: rgba(236, 239, 242, 0.44);
+      --glass-strong: rgba(245, 247, 250, 0.62);
+      --stroke: rgba(255, 255, 255, 0.52);
+      --ink-900: #121923;
+      --ink-700: #2c3a4f;
+      --ink-500: #4d617e;
+      --accent: #1368da;
+      --accent-soft: #d9e8ff;
+      --shadow: 0 28px 70px rgba(8, 13, 22, 0.32);
     }
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
     body {
       margin: 0;
-      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      background: radial-gradient(circle at top right, #e6edff 0, var(--bg) 45%);
-      color: var(--text);
+      min-height: 100vh;
+      color: var(--ink-900);
+      font-family: "IBM Plex Sans", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", sans-serif;
+      background:
+        radial-gradient(circle at 10% 12%, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0) 30%),
+        radial-gradient(circle at 85% 18%, rgba(38, 62, 94, 0.22), rgba(38, 62, 94, 0) 34%),
+        radial-gradient(circle at 75% 85%, rgba(15, 24, 37, 0.30), rgba(15, 24, 37, 0) 40%),
+        linear-gradient(135deg, var(--bg-paper), #c5cacf 55%, #b8bdc3);
+      overflow-x: hidden;
     }
-    .wrap { max-width: 960px; margin: 32px auto; padding: 0 16px; }
+    #inkCanvas {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.52;
+      mix-blend-mode: multiply;
+    }
+    .mist {
+      position: fixed;
+      border-radius: 999px;
+      filter: blur(44px);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .mist-a {
+      width: 380px;
+      height: 380px;
+      top: -70px;
+      left: -60px;
+      background: rgba(248, 251, 255, 0.62);
+      animation: driftA 14s ease-in-out infinite alternate;
+    }
+    .mist-b {
+      width: 460px;
+      height: 460px;
+      top: 8%;
+      right: -90px;
+      background: rgba(27, 47, 76, 0.26);
+      animation: driftB 18s ease-in-out infinite alternate;
+    }
+    .mist-c {
+      width: 420px;
+      height: 420px;
+      bottom: -130px;
+      left: 24%;
+      background: rgba(15, 20, 28, 0.22);
+      animation: driftC 20s ease-in-out infinite alternate;
+    }
+    .wrap {
+      position: relative;
+      z-index: 2;
+      max-width: 1040px;
+      margin: 44px auto;
+      padding: 0 18px 34px;
+    }
     .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 18px;
-      box-shadow: 0 12px 30px rgba(18, 32, 76, 0.08);
+      border-radius: 24px;
+      padding: 26px 24px 22px;
+      background: linear-gradient(135deg, var(--glass-strong), var(--glass));
+      border: 1px solid var(--stroke);
+      backdrop-filter: blur(14px) saturate(138%);
+      -webkit-backdrop-filter: blur(14px) saturate(138%);
+      box-shadow: var(--shadow);
+      transform: translateY(6px);
+      animation: riseIn 720ms cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
     }
-    h1 { margin: 0 0 12px; font-size: 26px; }
-    .muted { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
-    .row { display: flex; gap: 10px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-    label { font-size: 14px; font-weight: 600; min-width: 86px; }
-    input[type="text"], input[type="number"], select, textarea {
+    .hero {
+      margin-bottom: 18px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.36);
+    }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--ink-500);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(26px, 4.8vw, 42px);
+      line-height: 1.14;
+      font-family: "Noto Serif SC", "Source Han Serif SC", "STSong", serif;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      color: #0f1824;
+    }
+    .muted {
+      margin: 12px 0 0;
+      max-width: 760px;
+      color: var(--ink-700);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    label {
+      font-size: 13px;
+      font-weight: 700;
+      min-width: 82px;
+      color: var(--ink-700);
+      letter-spacing: 0.02em;
+    }
+    input[type="text"],
+    input[type="number"],
+    select,
+    textarea {
       width: 100%;
-      border: 1px solid var(--border);
-      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.54);
+      border-radius: 12px;
       padding: 10px 12px;
       font-size: 14px;
-      color: var(--text);
-      background: #fff;
+      color: var(--ink-900);
+      background: rgba(246, 249, 253, 0.72);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+      transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
     }
-    textarea { min-height: 200px; resize: vertical; }
-    .grow { flex: 1; min-width: 240px; }
+    input:focus,
+    select:focus,
+    textarea:focus {
+      outline: none;
+      border-color: rgba(19, 104, 218, 0.56);
+      background: rgba(252, 254, 255, 0.9);
+      box-shadow: 0 0 0 3px rgba(19, 104, 218, 0.18);
+    }
+    textarea {
+      min-height: 210px;
+      resize: vertical;
+      line-height: 1.6;
+    }
+    .grow {
+      flex: 1;
+      min-width: 240px;
+    }
+    .meta-panel {
+      margin: 14px 0 12px;
+      border: 1px solid rgba(255, 255, 255, 0.38);
+      border-radius: 14px;
+      background: rgba(246, 249, 252, 0.48);
+      padding: 12px 12px 2px;
+    }
+    .field {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .field-inline {
+      display: grid;
+      grid-template-columns: 82px 140px 62px 112px 62px 112px;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
     button {
       border: 0;
-      border-radius: 10px;
-      padding: 10px 14px;
+      border-radius: 12px;
+      padding: 11px 16px;
       font-size: 14px;
       cursor: pointer;
-      background: var(--accent);
+      font-weight: 700;
+      background: linear-gradient(120deg, var(--accent), #2e7be1);
       color: #fff;
+      box-shadow: 0 14px 28px rgba(19, 104, 218, 0.32);
+      transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
     }
-    button.secondary { background: #ecf2ff; color: #20408b; border: 1px solid #cfe0ff; }
-    button:disabled { opacity: .6; cursor: not-allowed; }
-    .checks { display: flex; gap: 18px; font-size: 14px; color: var(--muted); }
-    .checks label { min-width: auto; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 18px 32px rgba(19, 104, 218, 0.34);
+    }
+    button.secondary {
+      background: linear-gradient(120deg, #edf3ff, #e5edfb);
+      color: #1f437c;
+      border: 1px solid #cadafb;
+      box-shadow: none;
+    }
+    button.secondary:hover {
+      box-shadow: 0 8px 18px rgba(17, 49, 96, 0.16);
+    }
+    button:disabled {
+      opacity: 0.58;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    .checks {
+      display: flex;
+      gap: 18px;
+      font-size: 14px;
+      color: var(--ink-700);
+      margin-bottom: 10px;
+    }
+    .checks label {
+      min-width: auto;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      letter-spacing: 0.01em;
+    }
+    .checks input {
+      accent-color: #1b63c0;
+    }
     pre {
       margin: 0;
-      background: #0f172a;
-      color: #f8fafc;
-      border-radius: 12px;
-      padding: 12px;
-      min-height: 180px;
+      background: rgba(14, 20, 30, 0.84);
+      color: #e8edf6;
+      border-radius: 14px;
+      border: 1px solid rgba(147, 164, 187, 0.34);
+      padding: 13px 14px;
+      min-height: 190px;
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
       font-size: 12px;
-      line-height: 1.45;
+      line-height: 1.5;
+      box-shadow: inset 0 0 28px rgba(27, 35, 50, 0.5);
     }
-    @media (max-width: 740px) {
+    .actions {
+      margin-top: 8px;
+      margin-bottom: 12px;
+    }
+    .tagline {
+      margin-top: 10px;
+      margin-bottom: 0;
+      color: var(--ink-500);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    @keyframes riseIn {
+      from { opacity: 0; transform: translateY(16px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes driftA {
+      from { transform: translate(0, 0) scale(1); }
+      to { transform: translate(30px, 24px) scale(1.08); }
+    }
+    @keyframes driftB {
+      from { transform: translate(0, 0) scale(1); }
+      to { transform: translate(-34px, 22px) scale(0.92); }
+    }
+    @keyframes driftC {
+      from { transform: translate(0, 0) scale(1); }
+      to { transform: translate(32px, -20px) scale(1.06); }
+    }
+    @media (max-width: 920px) {
+      .field-inline {
+        grid-template-columns: 78px 1fr 60px 100px 60px 100px;
+      }
+    }
+    @media (max-width: 780px) {
+      .card {
+        padding: 20px 16px 16px;
+        border-radius: 18px;
+      }
+      .field {
+        grid-template-columns: 1fr;
+        gap: 6px;
+      }
+      .field-inline {
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .field-inline label:nth-child(1),
+      .field-inline label:nth-child(3),
+      .field-inline label:nth-child(5) {
+        margin-top: 2px;
+      }
       .row { flex-direction: column; align-items: stretch; }
       label { min-width: auto; }
     }
   </style>
 </head>
 <body>
+  <canvas id="inkCanvas"></canvas>
+  <div class="mist mist-a"></div>
+  <div class="mist mist-b"></div>
+  <div class="mist mist-c"></div>
   <div class="wrap">
     <div class="card">
-      <h1>论文批量下载器</h1>
-      <div class="muted">优先级固定为 arXiv -> IEEE -> major sites。粘贴多行论文名后点击开始。</div>
-
-      <div class="row">
-        <label>下载目录</label>
-        <input id="downloadDir" class="grow" type="text" placeholder="例如 D:\\papers" />
-        <button type="button" class="secondary" onclick="pickFolder()">选择文件夹</button>
+      <div class="hero">
+        <p class="eyebrow">Ink Glass Workflow</p>
+        <h1>论文批量下载器</h1>
+        <p class="muted">从混乱引用到整洁本地 PDF：支持整段粘贴、自动解析和多源下载，优先级固定为 <strong>arXiv -> IEEE -> major sites</strong>。</p>
       </div>
 
-      <div class="row">
-        <label>数据源</label>
-        <select id="source" class="grow">
-          <option value="both">both (推荐)</option>
-          <option value="arxiv">arxiv</option>
-          <option value="ieee">ieee</option>
-          <option value="major">major</option>
-        </select>
+      <div class="meta-panel">
+        <div class="field">
+          <label>下载目录</label>
+          <div class="row">
+            <input id="downloadDir" class="grow" type="text" placeholder="例如 D:\\papers" />
+            <button type="button" class="secondary" onclick="pickFolder()">选择文件夹</button>
+          </div>
+        </div>
 
-        <label>并发</label>
-        <input id="workers" type="number" min="1" max="16" value="4" style="width:100px" />
+        <div class="field-inline">
+          <label>数据源</label>
+          <select id="source">
+            <option value="both">both (推荐)</option>
+            <option value="arxiv">arxiv</option>
+            <option value="ieee">ieee</option>
+            <option value="major">major</option>
+          </select>
 
-        <label>阈值</label>
-        <input id="minScore" type="number" min="0" max="1" step="0.05" value="0.55" style="width:100px" />
+          <label>并发</label>
+          <input id="workers" type="number" min="1" max="16" value="4" />
+
+          <label>阈值</label>
+          <input id="minScore" type="number" min="0" max="1" step="0.05" value="0.55" />
+        </div>
+
+        <div class="checks">
+          <label><input id="ieeeManualLogin" type="checkbox" /> IEEE 手动登录/验证码</label>
+          <label><input id="ieeeHeadless" type="checkbox" /> IEEE 无头模式</label>
+        </div>
       </div>
 
-      <div class="row checks">
-        <label><input id="ieeeManualLogin" type="checkbox" /> IEEE 手动登录/验证码</label>
-        <label><input id="ieeeHeadless" type="checkbox" /> IEEE 无头模式</label>
+      <div class="field">
+        <label>论文输入</label>
+        <textarea id="paperTitles" class="grow" placeholder="可一行一个，也可整段粘贴（例如 Liu et al., 2023 Wang et al., 2022）"></textarea>
       </div>
 
-      <div class="row">
-        <label>论文列表</label>
-        <textarea id="paperTitles" class="grow" placeholder="可一行一个，也可整段粘贴（例如 Liu et al., 2023; Wang et al., 2022）"></textarea>
-      </div>
-
-      <div class="row">
+      <div class="actions">
         <button id="runBtn" type="button" onclick="runDownload()">开始下载</button>
       </div>
 
       <pre id="logs">等待开始...</pre>
+      <p class="tagline">Glassmorphism · Ink Particle · Local-First</p>
     </div>
   </div>
 
   <script>
+    const canvas = document.getElementById("inkCanvas");
+    const ctx = canvas.getContext("2d");
     const logsEl = document.getElementById("logs");
     const runBtn = document.getElementById("runBtn");
+    const particles = [];
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(window.innerWidth * dpr);
+      canvas.height = Math.floor(window.innerHeight * dpr);
+      canvas.style.width = window.innerWidth + "px";
+      canvas.style.height = window.innerHeight + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function createParticle(seedX) {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const startX = typeof seedX === "number" ? seedX : Math.random() * w;
+      return {
+        x: startX,
+        y: Math.random() * h,
+        r: 0.8 + Math.random() * 2.6,
+        vx: (-0.18 + Math.random() * 0.36),
+        vy: (-0.14 + Math.random() * 0.28),
+        alpha: 0.035 + Math.random() * 0.07
+      };
+    }
+
+    function initParticles() {
+      particles.length = 0;
+      const count = Math.min(110, Math.max(54, Math.floor(window.innerWidth / 16)));
+      for (let i = 0; i < count; i++) {
+        particles.push(createParticle());
+      }
+    }
+
+    function stepParticles() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "rgba(22, 30, 42, 0.08)";
+      ctx.fillRect(0, 0, w, h);
+
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+
+        if (p.x < -12 || p.x > w + 12 || p.y < -12 || p.y > h + 12) {
+          particles[i] = createParticle(Math.random() * w);
+          continue;
+        }
+
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(16, 24, 37, " + p.alpha.toFixed(3) + ")";
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      requestAnimationFrame(stepParticles);
+    }
 
     function setLogs(text) {
       logsEl.textContent = text || "";
@@ -279,6 +580,14 @@ def index() -> str:
         runBtn.disabled = false;
       }
     }
+
+    resizeCanvas();
+    initParticles();
+    stepParticles();
+    window.addEventListener("resize", () => {
+      resizeCanvas();
+      initParticles();
+    });
   </script>
 </body>
 </html>
