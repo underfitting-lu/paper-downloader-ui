@@ -1,0 +1,60 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build exe
+        shell: cmd
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name PaperDownloaderUI ^
+            --collect-all flask ^
+            --collect-all werkzeug ^
+            --collect-all jinja2 ^
+            --collect-all click ^
+            --collect-all dotenv ^
+            --collect-all selenium ^
+            web_ui.py
+
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release\PaperDownloaderUI -Force | Out-Null
+          Copy-Item dist\PaperDownloaderUI.exe release\PaperDownloaderUI\
+          Copy-Item README.md release\PaperDownloaderUI\
+          Copy-Item .env.example release\PaperDownloaderUI\
+          Compress-Archive -Path release\PaperDownloaderUI\* -DestinationPath release\PaperDownloaderUI-windows.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PaperDownloaderUI-windows
+          path: release/PaperDownloaderUI-windows.zip
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/PaperDownloaderUI-windows.zip
