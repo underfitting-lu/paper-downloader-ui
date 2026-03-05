@@ -1,17 +1,26 @@
 # Paper Downloader (Local Web UI + Packaged EXE)
 
-Stop wasting time on copy-paste paper hunting.
+## 中文简介
 
-If your workflow looks like this:
-- search a title manually
-- open multiple sites one by one
-- click PDF/download repeatedly
-- rename messy filenames after download
+还在为“找论文 + 点下载 + 改文件名”反复机械操作吗？
 
-This project is built for that exact pain.
+这个项目专门解决这个痛点：
+- 一次粘贴多篇论文（支持乱序引用文本）
+- 本地网页选择下载目录后一键运行
+- 自动检索并下载 PDF，文件名自动改为论文真实标题
 
-Paste a list of paper titles once, choose a folder, click run, and let it fetch papers automatically.
-The input parser supports both one-line-per-title and messy pasted blocks (for example: `Liu et al., 2023; Wang et al., 2022`).
+适合想把论文搜集流程标准化、批量化的学生和研究者。
+
+## English Overview
+
+Tired of the repetitive workflow: search title, open portals, click PDF, rename files?
+
+This project is built for exactly that pain:
+- Paste multiple paper names once (including messy citation blocks)
+- Choose a local folder in a simple web UI
+- Auto-fetch PDFs and rename files to the real paper titles
+
+Great for students and researchers who want a fast, repeatable paper collection workflow.
 
 Search priority is fixed:
 1. arXiv (first)
