@@ -1,12 +1,19 @@
 # Paper Downloader (Local Web UI + Packaged EXE)
 
-This tool provides a local page for batch paper download:
-- choose download folder
-- paste multiple paper titles (one per line)
-- click run
+Stop wasting time on copy-paste paper hunting.
+
+If your workflow looks like this:
+- search a title manually
+- open multiple sites one by one
+- click PDF/download repeatedly
+- rename messy filenames after download
+
+This project is built for that exact pain.
+
+Paste a list of paper titles once, choose a folder, click run, and let it fetch papers automatically.
 
 Search priority is fixed:
-1. arXiv
+1. arXiv (first)
 2. IEEE
 3. major publisher fallback (ACM/Springer/Elsevier/Wiley/Nature, etc.)
 
