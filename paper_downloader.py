@@ -59,6 +59,19 @@ MAJOR_DOMAIN_LABELS = (
     ("ieeexplore.ieee.org", "ieee"),
 )
 
+CITATION_CHAIN_INSERT_BREAK_RE = re.compile(
+    r"((?:19|20)\d{2}[a-z]?(?:[\).,;:])?)\s+"
+    r"(?=(?:[A-Z][A-Za-z'`\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'`\-]+)?"
+    r"(?:\s+et al\.)?,?\s*(?:19|20)\d{2}[a-z]?))"
+)
+PERIOD_AUTHOR_BREAK_RE = re.compile(
+    r"\.\s+(?=(?:[A-Z][A-Za-z'`\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'`\-]+)?"
+    r"(?:\s+et al\.)?,?\s*(?:19|20)\d{2}[a-z]?))"
+)
+NUMBERED_ITEM_BREAK_RE = re.compile(r"\s+(?=(?:\d+\s*[\).、]))")
+REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+\]|\(\d+\)|\d+\s*[\).、]|[-*•▪●])\s*")
+LIST_SPLIT_RE = re.compile(r"(?:\n+|[;；|]+)")
+
 
 @dataclass(frozen=True)
 class SearchResult:
@@ -169,18 +182,60 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def extract_paper_queries(raw_text: str) -> list[str]:
+    text = raw_text.replace("\r\n", "\n").replace("\r", "\n").replace("\u3000", " ")
+    text = re.sub(r"[ \t\f\v]+", " ", text).strip()
+    if not text:
+        return []
+
+    rough_chunks = LIST_SPLIT_RE.split(text)
+    candidates: list[str] = []
+
+    for chunk in rough_chunks:
+        normalized_chunk = normalize_whitespace(chunk)
+        if not normalized_chunk:
+            continue
+        normalized_chunk = REFERENCE_PREFIX_RE.sub("", normalized_chunk).strip(" ,;")
+        if not normalized_chunk:
+            continue
+
+        # Handles concatenated citation strings such as:
+        # "Liu et al., 2023 Wang et al., 2022 ..."
+        split_ready_chunk = CITATION_CHAIN_INSERT_BREAK_RE.sub(
+            r"\1\n", normalized_chunk
+        )
+        split_ready_chunk = PERIOD_AUTHOR_BREAK_RE.sub(".\n", split_ready_chunk)
+        split_ready_chunk = NUMBERED_ITEM_BREAK_RE.sub("\n", split_ready_chunk)
+        split_chunks = split_ready_chunk.splitlines()
+        for split_chunk in split_chunks:
+            title = normalize_whitespace(split_chunk)
+            title = REFERENCE_PREFIX_RE.sub("", title).strip(" ,;")
+            if len(title) >= 3:
+                candidates.append(title)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = normalize_whitespace(candidate).lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
 def read_papers(papers_inline: Sequence[str], papers_file: str | None) -> list[str]:
     papers: list[str] = []
-    papers.extend([p.strip() for p in papers_inline if p.strip()])
+    for inline_item in papers_inline:
+        if not inline_item.strip():
+            continue
+        papers.extend(extract_paper_queries(inline_item))
 
     if papers_file:
         file_path = Path(papers_file)
         if not file_path.exists():
             raise FileNotFoundError(f"Papers file not found: {file_path}")
-        for line in file_path.read_text(encoding="utf-8").splitlines():
-            title = line.strip()
-            if title and not title.startswith("#"):
-                papers.append(title)
+        file_text = file_path.read_text(encoding="utf-8")
+        papers.extend(extract_paper_queries(file_text))
 
     unique: list[str] = []
     seen = set()

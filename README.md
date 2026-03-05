@@ -11,6 +11,7 @@ If your workflow looks like this:
 This project is built for that exact pain.
 
 Paste a list of paper titles once, choose a folder, click run, and let it fetch papers automatically.
+The input parser supports both one-line-per-title and messy pasted blocks (for example: `Liu et al., 2023; Wang et al., 2022`).
 
 Search priority is fixed:
 1. arXiv (first)
@@ -64,3 +65,7 @@ How to use:
 - min score: title match threshold (0-1, larger is stricter)
 - IEEE manual login: use when CAPTCHA/login is required
 - IEEE headless: run IEEE browser in background
+- input parser supports:
+  - one title per line
+  - numbered lists like `1) ... 2) ...`
+  - pasted citation chains like `Liu et al., 2023 Wang et al., 2022`

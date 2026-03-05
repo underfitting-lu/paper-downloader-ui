@@ -54,15 +54,6 @@ def open_folder_dialog(initial_dir: str) -> str:
     return selected or ""
 
 
-def parse_titles(raw: str) -> list[str]:
-    titles: list[str] = []
-    for line in raw.splitlines():
-        title = line.strip()
-        if title and not title.startswith("#"):
-            titles.append(title)
-    return titles
-
-
 def build_cli_args(
     titles_file: Path,
     download_dir: str,
@@ -224,7 +215,7 @@ def index() -> str:
 
       <div class="row">
         <label>论文列表</label>
-        <textarea id="paperTitles" class="grow" placeholder="每行一篇论文标题"></textarea>
+        <textarea id="paperTitles" class="grow" placeholder="可一行一个，也可整段粘贴（例如 Liu et al., 2023; Wang et al., 2022）"></textarea>
       </div>
 
       <div class="row">
@@ -309,7 +300,7 @@ def select_folder() -> Any:
 def download() -> Any:
     payload = request.get_json(silent=True) or {}
     raw_titles = str(payload.get("paper_titles", ""))
-    titles = parse_titles(raw_titles)
+    titles = paper_downloader.extract_paper_queries(raw_titles)
     if not titles:
         return jsonify({"ok": False, "error": "No paper titles provided.", "exit_code": 1}), 400
 
@@ -354,6 +345,13 @@ def download() -> Any:
 
     try:
         exit_code, logs = run_downloader(cli_args)
+        parsed_preview = ", ".join(titles[:5])
+        if len(titles) > 5:
+            parsed_preview += ", ..."
+        logs = (
+            f"[WEB] Parsed {len(titles)} item(s): {parsed_preview}\n"
+            f"{logs}"
+        ).strip()
         return jsonify(
             {
                 "ok": exit_code == 0,
