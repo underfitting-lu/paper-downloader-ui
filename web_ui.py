@@ -505,7 +505,7 @@ def index() -> str:
             <span class="hint-tip" tabindex="0" title="阈值说明">?</span>
             <span class="tip-bubble">阈值是最低匹配分数（0~1）。越高越严格，误匹配更少；越低越宽松，但可能下载到不相关论文。</span>
           </label>
-          <input id="minScore" type="number" min="0" max="1" step="0.05" value="0.55" />
+          <input id="minScore" type="number" min="0" max="1" step="0.05" value="0.9" />
         </div>
 
         <div class="checks">
@@ -620,7 +620,7 @@ def index() -> str:
         download_dir: document.getElementById("downloadDir").value.trim(),
         source: document.getElementById("source").value,
         workers: Number(document.getElementById("workers").value || 1),
-        min_score: Number(document.getElementById("minScore").value || 0.55),
+        min_score: Number(document.getElementById("minScore").value || 0.9),
         ieee_manual_login: document.getElementById("ieeeManualLogin").checked,
         ieee_headless: document.getElementById("ieeeHeadless").checked,
         scholar_manual_login: document.getElementById("scholarManualLogin").checked,
@@ -691,9 +691,9 @@ def download() -> Any:
         workers = 4
 
     try:
-        min_score = float(payload.get("min_score", 0.55))
+        min_score = float(payload.get("min_score", 0.9))
     except Exception:
-        min_score = 0.55
+        min_score = 0.9
     min_score = min(1.0, max(0.0, min_score))
 
     ieee_manual_login = bool(payload.get("ieee_manual_login", False))

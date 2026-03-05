@@ -1124,7 +1124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     min_score = (
         args.min_score
         if args.min_score is not None
-        else parse_float_env("MIN_MATCH_SCORE", default=0.55)
+        else parse_float_env("MIN_MATCH_SCORE", default=0.9)
     )
     workers = max(1, args.workers)
     download_dir = build_download_dir(args)
