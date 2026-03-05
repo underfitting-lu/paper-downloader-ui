@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 import tempfile
 import threading
 import webbrowser
@@ -26,6 +27,14 @@ import paper_downloader
 APP_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__)
+
+# Web UI runs portal access in auto mode:
+# - headless first for lower interruption
+# - fallback behaviors are handled by paper_downloader internally
+AUTO_IEEE_MANUAL_LOGIN = False
+AUTO_IEEE_HEADLESS = True
+AUTO_SCHOLAR_MANUAL_LOGIN = False
+AUTO_SCHOLAR_HEADLESS = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,10 +69,6 @@ def build_cli_args(
     source: str,
     workers: int,
     min_score: float,
-    ieee_manual_login: bool,
-    ieee_headless: bool,
-    scholar_manual_login: bool,
-    scholar_headless: bool,
 ) -> list[str]:
     cli_args = [
         "--papers-file",
@@ -77,13 +82,13 @@ def build_cli_args(
         "--min-score",
         str(min_score),
     ]
-    if ieee_manual_login:
+    if AUTO_IEEE_MANUAL_LOGIN:
         cli_args.append("--ieee-manual-login")
-    if ieee_headless:
+    if AUTO_IEEE_HEADLESS:
         cli_args.append("--ieee-headless")
-    if scholar_manual_login:
+    if AUTO_SCHOLAR_MANUAL_LOGIN:
         cli_args.append("--scholar-manual-login")
-    if scholar_headless:
+    if AUTO_SCHOLAR_HEADLESS:
         cli_args.append("--scholar-headless")
     return cli_args
 
@@ -92,12 +97,19 @@ def run_downloader(cli_args: list[str]) -> tuple[int, str]:
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     exit_code = 1
+    old_web_ui_flag = os.getenv("PAPER_DOWNLOADER_WEB_UI")
+    os.environ["PAPER_DOWNLOADER_WEB_UI"] = "1"
     with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
         try:
             exit_code = paper_downloader.main(cli_args)
         except Exception as exc:  # noqa: BLE001
             print(f"[WEB][ERROR] downloader crashed: {exc}")
             exit_code = 1
+        finally:
+            if old_web_ui_flag is None:
+                os.environ.pop("PAPER_DOWNLOADER_WEB_UI", None)
+            else:
+                os.environ["PAPER_DOWNLOADER_WEB_UI"] = old_web_ui_flag
 
     stdout_text = stdout_buffer.getvalue().strip()
     stderr_text = stderr_buffer.getvalue().strip()
@@ -508,12 +520,7 @@ def index() -> str:
           <input id="minScore" type="number" min="0" max="1" step="0.05" value="0.9" />
         </div>
 
-        <div class="checks">
-          <label><input id="ieeeManualLogin" type="checkbox" /> IEEE 手动登录/验证码</label>
-          <label><input id="ieeeHeadless" type="checkbox" /> IEEE 无头模式</label>
-          <label><input id="scholarManualLogin" type="checkbox" /> Scholar/门户手动登录</label>
-          <label><input id="scholarHeadless" type="checkbox" /> Scholar 无头模式</label>
-        </div>
+        <p class="muted">门户登录模式已自动化：系统会优先后台模式执行，必要时自动切换到可见浏览器重试。</p>
       </div>
 
       <div class="field">
@@ -621,10 +628,6 @@ def index() -> str:
         source: document.getElementById("source").value,
         workers: Number(document.getElementById("workers").value || 1),
         min_score: Number(document.getElementById("minScore").value || 0.9),
-        ieee_manual_login: document.getElementById("ieeeManualLogin").checked,
-        ieee_headless: document.getElementById("ieeeHeadless").checked,
-        scholar_manual_login: document.getElementById("scholarManualLogin").checked,
-        scholar_headless: document.getElementById("scholarHeadless").checked,
         paper_titles: document.getElementById("paperTitles").value
       };
 
@@ -696,11 +699,6 @@ def download() -> Any:
         min_score = 0.9
     min_score = min(1.0, max(0.0, min_score))
 
-    ieee_manual_login = bool(payload.get("ieee_manual_login", False))
-    ieee_headless = bool(payload.get("ieee_headless", False))
-    scholar_manual_login = bool(payload.get("scholar_manual_login", False))
-    scholar_headless = bool(payload.get("scholar_headless", False))
-
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".txt", delete=False
     ) as temp_file:
@@ -714,10 +712,6 @@ def download() -> Any:
         source=source,
         workers=workers,
         min_score=min_score,
-        ieee_manual_login=ieee_manual_login,
-        ieee_headless=ieee_headless,
-        scholar_manual_login=scholar_manual_login,
-        scholar_headless=scholar_headless,
     )
 
     try:

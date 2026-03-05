@@ -74,10 +74,7 @@ How to use:
 - source: `both` / `arxiv` / `ieee` / `scholar` / `orcid` / `major`
 - workers: parallel downloads
 - min score: title match threshold (0-1, larger is stricter)
-- IEEE manual login: use when CAPTCHA/login is required
-- IEEE headless: run IEEE browser in background
-- Scholar manual login: wait for you to finish Scholar/portal login before continuing
-- Scholar headless: run Scholar browser in background
+- portal mode: automatic (headless-first with built-in fallback)
 - input parser supports:
   - one title per line
   - numbered lists like `1) ... 2) ...`
@@ -87,5 +84,7 @@ How to use:
 ## Login Behavior (Important)
 
 - IEEE and Scholar/portal manual login are done once per run (session reused), so it will not keep re-opening login for every paper.
+- Browser session is persisted under `.browser-profile` by default, so login state can survive across app restarts.
+- If IEEE headless mode fails to get a usable result, the script auto-retries once in visible mode with the same profile.
 - In terminal mode, it waits for your Enter confirmation after login.
 - In non-interactive mode (for example packaged app without stdin), it uses `MANUAL_LOGIN_WAIT_SECONDS` from `.env` before sending the next request.

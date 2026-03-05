@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -54,6 +54,12 @@ ORCID_EXPANDED_SEARCH_URL = "https://pub.orcid.org/v3.0/expanded-search/"
 ORCID_WORKS_URL_TEMPLATE = "https://pub.orcid.org/v3.0/{orcid_id}/works"
 SCHOLAR_BASE_URL = "https://scholar.google.com"
 SCHOLAR_SEARCH_URL_TEMPLATE = "https://scholar.google.com/scholar?q={query}"
+PORTAL_BASE_URLS = {
+    "ieee": IEEE_BASE_URL,
+    "scholar": SCHOLAR_BASE_URL,
+}
+APP_DIR = Path(__file__).resolve().parent
+BROWSER_PROFILE_DEFAULT_DIR = APP_DIR / ".browser-profile"
 
 MAJOR_DOMAIN_LABELS = (
     ("dl.acm.org", "acm"),
@@ -91,6 +97,10 @@ NUMBERED_ITEM_BREAK_RE = re.compile(r"\s+(?=(?:\d+\s*[\).、]))")
 REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+\]|\(\d+\)|\d+\s*[\).、]|[-*•▪●])\s*")
 LIST_SPLIT_RE = re.compile(r"(?:\n+|[;；|]+)")
 ORCID_ID_RE = re.compile(r"\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b", re.IGNORECASE)
+CAPTCHA_OR_LOGIN_RE = re.compile(
+    r"(captcha|verification|sign in|log in|institutional access|access through your institution)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -210,6 +220,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Seconds to wait for IEEE pages to render.",
     )
     parser.add_argument(
+        "--ieee-profile-dir",
+        help="Chrome user-data-dir for IEEE session persistence.",
+    )
+    parser.add_argument(
         "--scholar-headless",
         action="store_true",
         help="Run Google Scholar browser headless.",
@@ -223,6 +237,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--scholar-wait",
         type=int,
         help="Seconds to wait for Scholar pages to render.",
+    )
+    parser.add_argument(
+        "--scholar-profile-dir",
+        help="Chrome user-data-dir for Scholar/portal session persistence.",
     )
     return parser.parse_args(argv)
 
@@ -347,6 +365,28 @@ def is_pdf_response(response: requests.Response) -> bool:
     return response.url.lower().endswith(".pdf")
 
 
+def is_probable_pdf_response(response: requests.Response, first_chunk: bytes) -> bool:
+    if is_pdf_response(response):
+        return True
+
+    content_disposition = response.headers.get("Content-Disposition", "").lower()
+    if ".pdf" in content_disposition:
+        return True
+
+    if first_chunk.startswith(b"%PDF-"):
+        return True
+    return False
+
+
+def extract_ieee_arnumber(*texts: str) -> str | None:
+    joined = " ".join(texts)
+    for pattern in (r"arnumber=(\d+)", r"/document/(\d+)"):
+        match = re.search(pattern, joined, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
 def derive_arxiv_pdf_url(entry: ET.Element) -> str | None:
     for link in entry.findall("atom:link", ATOM_NS):
         href = (link.attrib.get("href") or "").strip()
@@ -414,7 +454,7 @@ def search_arxiv(
     return candidates[0]
 
 
-def build_ieee_driver(headless: bool, user_agent: str) -> Any:
+def build_ieee_driver(headless: bool, user_agent: str, profile_dir: Path | None) -> Any:
     if not SELENIUM_AVAILABLE:
         raise RuntimeError("selenium is not available. Install requirements.txt first.")
 
@@ -425,6 +465,10 @@ def build_ieee_driver(headless: bool, user_agent: str) -> Any:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1400,1200")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    if profile_dir is not None:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        options.add_argument(f"--user-data-dir={profile_dir.resolve()}")
+        options.add_argument("--profile-directory=Default")
     if user_agent:
         options.add_argument(f"--user-agent={user_agent}")
     if headless:
@@ -437,14 +481,17 @@ def build_ieee_driver(headless: bool, user_agent: str) -> Any:
 
 def manual_checkpoint(message: str) -> None:
     print(message)
+    force_no_prompt = parse_bool_env("PAPER_DOWNLOADER_WEB_UI") or parse_bool_env(
+        "MANUAL_LOGIN_NO_PROMPT"
+    )
     try:
-        if sys.stdin is not None and sys.stdin.isatty():
+        if not force_no_prompt and sys.stdin is not None and sys.stdin.isatty():
             input("Press Enter to continue...")
             return
     except Exception:
         pass
 
-    wait_seconds = parse_int_env("MANUAL_LOGIN_WAIT_SECONDS", default=120, minimum=5)
+    wait_seconds = parse_int_env("MANUAL_LOGIN_WAIT_SECONDS", default=45, minimum=5)
     print(
         "[INFO] Non-interactive mode detected. "
         f"Waiting {wait_seconds}s for manual login to complete."
@@ -695,6 +742,11 @@ def resolve_pdf_from_landing(
     if "html" not in content_type and "<html" not in landing_resp.text[:400].lower():
         return None
 
+    page_head = landing_resp.text[:12000]
+    if CAPTCHA_OR_LOGIN_RE.search(page_head):
+        # Keep trying to parse, but this usually indicates access/login wall.
+        pass
+
     pdf_url = extract_major_pdf_url(landing_resp.text, landing_resp.url, doi)
     if not pdf_url:
         return None
@@ -861,7 +913,7 @@ def search_orcid(
     return None
 
 
-def build_scholar_driver(headless: bool, user_agent: str) -> Any:
+def build_scholar_driver(headless: bool, user_agent: str, profile_dir: Path | None) -> Any:
     if not SELENIUM_AVAILABLE:
         raise RuntimeError("selenium is not available. Install requirements.txt first.")
 
@@ -872,6 +924,10 @@ def build_scholar_driver(headless: bool, user_agent: str) -> Any:
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1400,1200")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    if profile_dir is not None:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        options.add_argument(f"--user-data-dir={profile_dir.resolve()}")
+        options.add_argument("--profile-directory=Default")
     if user_agent:
         options.add_argument(f"--user-agent={user_agent}")
     if headless:
@@ -892,6 +948,101 @@ def maybe_manual_scholar_login(driver: Any, enabled: bool) -> None:
     )
 
 
+def sync_driver_cookies_to_session(driver: Any, session: requests.Session) -> None:
+    try:
+        cookies = driver.get_cookies()
+    except Exception:
+        return
+    add_cookies_to_session(session, cookies)
+
+
+def resolve_pdf_with_selenium_driver(
+    driver: Any,
+    session: requests.Session,
+    landing_url: str,
+    wait_seconds: int,
+) -> str | None:
+    try:
+        driver.get(landing_url)
+    except Exception:
+        return None
+    time.sleep(max(2, wait_seconds))
+    sync_driver_cookies_to_session(driver, session)
+
+    current_url = normalize_whitespace(getattr(driver, "current_url", "") or "")
+    if current_url.lower().endswith(".pdf"):
+        return current_url
+
+    page_source = getattr(driver, "page_source", "") or ""
+    if not page_source:
+        return None
+    if CAPTCHA_OR_LOGIN_RE.search(page_source[:12000]):
+        return None
+
+    resolved = extract_major_pdf_url(page_source, current_url or landing_url, doi="")
+    if resolved:
+        return resolved
+
+    # IEEE fallback link patterns are sometimes embedded in inline scripts.
+    arnumber = extract_ieee_arnumber(current_url, page_source)
+    if arnumber:
+        return f"{IEEE_BASE_URL}/stamp/stamp.jsp?tp=&arnumber={arnumber}"
+    return None
+
+
+def unwrap_scholar_outbound_url(raw_url: str) -> str:
+    url = normalize_whitespace(raw_url)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if "scholar.google." not in host:
+        return url
+    if not (path.startswith("/scholar_url") or path.startswith("/url")):
+        return url
+
+    query = parse_qs(parsed.query, keep_blank_values=False)
+    for key in ("url", "q"):
+        values = query.get(key) or []
+        if not values:
+            continue
+        candidate = normalize_whitespace(unquote(values[0]))
+        if candidate.startswith("http://") or candidate.startswith("https://"):
+            return candidate
+    return url
+
+
+def resolve_scholar_candidate_url(
+    session: requests.Session,
+    driver: Any,
+    candidate_url: str,
+    timeout: int,
+    wait_seconds: int,
+) -> str | None:
+    direct_url = unwrap_scholar_outbound_url(candidate_url)
+    if not direct_url:
+        return None
+    if direct_url.lower().endswith(".pdf"):
+        return direct_url
+
+    resolved = resolve_pdf_from_landing(session, direct_url, doi="", timeout=timeout)
+    if resolved:
+        pdf_url, _ = resolved
+        return pdf_url
+
+    return resolve_pdf_with_selenium_driver(
+        driver=driver,
+        session=session,
+        landing_url=direct_url,
+        wait_seconds=wait_seconds,
+    )
+
+
 def search_google_scholar(
     session: requests.Session,
     driver: Any,
@@ -902,6 +1053,7 @@ def search_google_scholar(
     domain_filter: str | None,
     source_label: str,
 ) -> SearchResult | None:
+    sync_driver_cookies_to_session(driver, session)
     search_query = query if not domain_filter else f"{query} site:{domain_filter}"
     search_url = SCHOLAR_SEARCH_URL_TEMPLATE.format(query=quote_plus(search_query))
     driver.get(search_url)
@@ -913,6 +1065,13 @@ def search_google_scholar(
         return None
 
     results = driver.find_elements(By.CSS_SELECTOR, "div.gs_r.gs_or.gs_scl")
+    if not results:
+        page_source = (driver.page_source or "")[:15000]
+        if CAPTCHA_OR_LOGIN_RE.search(page_source):
+            print(
+                "[WARN] Scholar/portal page looks like login or verification wall. "
+                "Try manual login and keep the browser session alive."
+            )
     candidates: list[dict[str, Any]] = []
     for result in results:
         title_els = result.find_elements(By.CSS_SELECTOR, "h3.gs_rt")
@@ -951,29 +1110,33 @@ def search_google_scholar(
 
     candidates.sort(key=lambda item: float(item["score"]), reverse=True)
     for candidate in candidates:
-        if candidate["pdf_url"]:
+        title = str(candidate["title"])
+        score = float(candidate["score"])
+        ordered_urls: list[str] = []
+        candidate_pdf_url = normalize_whitespace(str(candidate["pdf_url"]))
+        candidate_article_url = normalize_whitespace(str(candidate["article_url"]))
+        if candidate_pdf_url:
+            ordered_urls.append(candidate_pdf_url)
+        if candidate_article_url:
+            ordered_urls.append(candidate_article_url)
+
+        for candidate_url in ordered_urls:
+            resolved_pdf_url = resolve_scholar_candidate_url(
+                session=session,
+                driver=driver,
+                candidate_url=candidate_url,
+                timeout=timeout,
+                wait_seconds=wait_seconds,
+            )
+            if not resolved_pdf_url:
+                continue
             return SearchResult(
                 source=source_label,
                 query=query,
-                title=str(candidate["title"]),
-                pdf_url=str(candidate["pdf_url"]),
-                score=float(candidate["score"]),
+                title=title,
+                pdf_url=resolved_pdf_url,
+                score=score,
             )
-
-        article_url = str(candidate["article_url"])
-        if not article_url:
-            continue
-        resolved = resolve_pdf_from_landing(session, article_url, doi="", timeout=timeout)
-        if not resolved:
-            continue
-        pdf_url, _ = resolved
-        return SearchResult(
-            source=source_label,
-            query=query,
-            title=str(candidate["title"]),
-            pdf_url=pdf_url,
-            score=float(candidate["score"]),
-        )
     return None
 
 
@@ -989,6 +1152,38 @@ def add_cookies_to_session(session: requests.Session, cookies: list[dict[str, An
             session.cookies.set(name, value, domain=domain, path=path)
         else:
             session.cookies.set(name, value, path=path)
+
+
+def cookies_from_cookiejar(cookiejar: requests.cookies.RequestsCookieJar) -> list[dict[str, Any]]:
+    cookies: list[dict[str, Any]] = []
+    for cookie in cookiejar:
+        cookies.append(
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path or "/",
+            }
+        )
+    return cookies
+
+
+def merge_cookie_dicts(*cookie_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for cookie_list in cookie_lists:
+        for cookie in cookie_list:
+            name = str(cookie.get("name", "")).strip()
+            domain = str(cookie.get("domain", "")).strip()
+            path = str(cookie.get("path", "/")).strip() or "/"
+            if not name:
+                continue
+            key = (name, domain, path)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(cookie)
+    return merged
 
 
 def strip_orcid_prefix(source: str) -> str:
@@ -1009,6 +1204,55 @@ def uses_scholar_cookies(source: str) -> bool:
     }:
         return True
     return source.startswith("orcid-") and base in {"elsevier", "acs", "science", "cell", "nature"}
+
+
+def build_followup_pdf_urls(result: SearchResult, response: requests.Response) -> list[str]:
+    urls: list[str] = []
+    current_url = normalize_whitespace(response.url)
+    content_type = response.headers.get("Content-Type", "").lower()
+    unwrapped_current_url = unwrap_scholar_outbound_url(current_url)
+    if unwrapped_current_url and unwrapped_current_url != current_url:
+        urls.append(unwrapped_current_url)
+
+    if "html" in content_type:
+        try:
+            html = response.text
+        except Exception:
+            html = ""
+        if html:
+            derived = extract_major_pdf_url(html, current_url, doi="")
+            if derived:
+                urls.append(derived)
+            meta_refresh = re.search(
+                r"<meta[^>]+http-equiv=['\"]refresh['\"][^>]+content=['\"][^'\"]*url=([^'\";]+)",
+                html,
+                flags=re.IGNORECASE,
+            )
+            if meta_refresh:
+                refresh_url = normalize_whitespace(meta_refresh.group(1))
+                if refresh_url:
+                    urls.append(urljoin(current_url, refresh_url))
+            arnumber = extract_ieee_arnumber(current_url, html)
+        else:
+            arnumber = extract_ieee_arnumber(current_url)
+    else:
+        arnumber = extract_ieee_arnumber(current_url)
+
+    if strip_orcid_prefix(result.source) == "ieee" and arnumber:
+        urls.append(f"{IEEE_BASE_URL}/stamp/stamp.jsp?tp=&arnumber={arnumber}")
+        urls.append(
+            f"{IEEE_BASE_URL}/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}&ref="
+        )
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        normalized = normalize_whitespace(url)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
 
 
 def download_one(
@@ -1035,25 +1279,53 @@ def download_one(
         add_cookies_to_session(session, scholar_cookies)
 
     try:
-        response = session.get(
-            result.pdf_url, timeout=timeout, stream=True, allow_redirects=True
-        )
-        response.raise_for_status()
-        if not is_pdf_response(response):
+        pending_urls: list[str] = [normalize_whitespace(result.pdf_url)]
+        tried_urls: set[str] = set()
+        max_attempts = 4
+        attempts = 0
+
+        while pending_urls and attempts < max_attempts:
+            target_url = pending_urls.pop(0)
+            if not target_url or target_url in tried_urls:
+                continue
+            tried_urls.add(target_url)
+            attempts += 1
+
+            response = session.get(
+                target_url,
+                timeout=timeout,
+                stream=False,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+
+            body = response.content or b""
+            first_chunk = body[:8192]
+
+            if is_probable_pdf_response(response, first_chunk):
+                with output_path.open("wb") as file:
+                    file.write(body)
+                print(
+                    f"[DOWNLOADED] {result.query} [{result.source}] "
+                    f"-> {output_path.name}"
+                )
+                return True
+
+            followups = build_followup_pdf_urls(result, response)
             ctype = response.headers.get("Content-Type", "unknown")
             print(
-                f"[SKIP] Not a direct PDF for '{result.query}' "
-                f"from {result.source} (Content-Type: {ctype})."
+                f"[INFO] Non-PDF attempt for '{result.query}' ({result.source}): "
+                f"{target_url} (Content-Type: {ctype}), follow-ups={len(followups)}"
             )
-            return False
+            for followup_url in followups:
+                if followup_url not in tried_urls and followup_url not in pending_urls:
+                    pending_urls.append(followup_url)
 
-        with output_path.open("wb") as file:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    file.write(chunk)
-
-        print(f"[DOWNLOADED] {result.query} [{result.source}] -> {output_path.name}")
-        return True
+        print(
+            f"[SKIP] No downloadable PDF response for '{result.query}' "
+            f"from {result.source} after {attempts} attempt(s)."
+        )
+        return False
     except requests.RequestException as exc:
         print(f"[ERROR] Download failed for '{result.query}' from {result.source}: {exc}")
         try:
@@ -1174,6 +1446,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if ieee_manual_login and ieee_headless:
         print("[WARN] --ieee-manual-login conflicts with headless; disabling headless.")
         ieee_headless = False
+    base_profile_dir = Path(
+        _env("BROWSER_PROFILE_DIR", str(BROWSER_PROFILE_DEFAULT_DIR))
+    ).expanduser()
+    ieee_profile_dir = Path(
+        args.ieee_profile_dir or _env("IEEE_PROFILE_DIR", str(base_profile_dir / "ieee"))
+    ).expanduser()
 
     scholar_manual_login = args.scholar_manual_login or parse_bool_env(
         "SCHOLAR_MANUAL_LOGIN"
@@ -1183,6 +1461,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if scholar_manual_login and scholar_headless:
         print("[WARN] --scholar-manual-login conflicts with headless; disabling headless.")
         scholar_headless = False
+    scholar_profile_dir = Path(
+        args.scholar_profile_dir
+        or _env("SCHOLAR_PROFILE_DIR", str(base_profile_dir / "scholar"))
+    ).expanduser()
 
     if (use_ieee or use_scholar) and not SELENIUM_AVAILABLE:
         if source in {"ieee", "scholar"}:
@@ -1201,6 +1483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ieee_cookies: list[dict[str, Any]] = []
     scholar_cookies: list[dict[str, Any]] = []
     matches: list[SearchResult] = []
+    ieee_headless_retry_done = False
 
     if use_arxiv:
         arxiv_session = requests.Session()
@@ -1241,6 +1524,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[INFO] Source mode: {source}")
     print("[INFO] Priority: arXiv -> IEEE -> Scholar/portals -> ORCID -> major sites")
     print(f"[INFO] Download directory: {download_dir.resolve()}")
+    if use_ieee:
+        print(f"[INFO] IEEE profile dir: {ieee_profile_dir.resolve()}")
+    if use_scholar:
+        print(f"[INFO] Scholar profile dir: {scholar_profile_dir.resolve()}")
     print(f"[INFO] Paper count: {len(papers)}")
 
     try:
@@ -1273,11 +1560,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     if picked:
                         print(f"[MATCH][IEEE] {paper} -> {picked.title}")
+                    elif ieee_headless and not ieee_headless_retry_done:
+                        print(
+                            "[WARN] IEEE headless run did not yield a usable match. "
+                            "Retrying once in visible mode with the same profile."
+                        )
+                        ieee_headless_retry_done = True
+                        try:
+                            ieee_driver.quit()
+                        except Exception:
+                            pass
+                        ieee_headless = False
+                        ieee_driver = build_ieee_driver(
+                            headless=False,
+                            user_agent=ieee_user_agent,
+                            profile_dir=ieee_profile_dir,
+                        )
+                        maybe_manual_ieee_login(ieee_driver, enabled=True)
+                        print(f"[SEARCH][IEEE][retry-visible] {paper}")
+                        picked = search_ieee(
+                            ieee_driver,
+                            paper,
+                            wait_seconds=ieee_wait,
+                            min_score=min_score,
+                        )
+                        if picked:
+                            print(f"[MATCH][IEEE] {paper} -> {picked.title}")
                 except Exception as exc:  # noqa: BLE001
                     print(f"[ERROR] IEEE search failed for '{paper}': {exc}")
             elif not picked and use_ieee and ieee_driver is None:
                 try:
-                    ieee_driver = build_ieee_driver(ieee_headless, ieee_user_agent)
+                    ieee_driver = build_ieee_driver(
+                        headless=ieee_headless,
+                        user_agent=ieee_user_agent,
+                        profile_dir=ieee_profile_dir,
+                    )
                     maybe_manual_ieee_login(ieee_driver, ieee_manual_login)
                     print(f"[SEARCH][IEEE] {paper}")
                     picked = search_ieee(
@@ -1288,6 +1605,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     if picked:
                         print(f"[MATCH][IEEE] {paper} -> {picked.title}")
+                    elif ieee_headless and not ieee_headless_retry_done:
+                        print(
+                            "[WARN] IEEE headless run did not yield a usable match. "
+                            "Retrying once in visible mode with the same profile."
+                        )
+                        ieee_headless_retry_done = True
+                        try:
+                            ieee_driver.quit()
+                        except Exception:
+                            pass
+                        ieee_headless = False
+                        ieee_driver = build_ieee_driver(
+                            headless=False,
+                            user_agent=ieee_user_agent,
+                            profile_dir=ieee_profile_dir,
+                        )
+                        maybe_manual_ieee_login(ieee_driver, enabled=True)
+                        print(f"[SEARCH][IEEE][retry-visible] {paper}")
+                        picked = search_ieee(
+                            ieee_driver,
+                            paper,
+                            wait_seconds=ieee_wait,
+                            min_score=min_score,
+                        )
+                        if picked:
+                            print(f"[MATCH][IEEE] {paper} -> {picked.title}")
                 except Exception as exc:  # noqa: BLE001
                     if source == "ieee":
                         print(f"[ERROR] Failed to initialize/search IEEE: {exc}")
@@ -1299,7 +1642,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if scholar_driver is None:
                     try:
                         scholar_driver = build_scholar_driver(
-                            scholar_headless, scholar_user_agent
+                            headless=scholar_headless,
+                            user_agent=scholar_user_agent,
+                            profile_dir=scholar_profile_dir,
                         )
                         maybe_manual_scholar_login(
                             scholar_driver, scholar_manual_login
@@ -1403,7 +1748,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             arxiv_session.close()
         if orcid_session is not None:
             orcid_session.close()
+        scholar_session_cookies: list[dict[str, Any]] = []
         if scholar_session is not None:
+            scholar_session_cookies = cookies_from_cookiejar(scholar_session.cookies)
             scholar_session.close()
         if major_session is not None:
             major_session.close()
@@ -1412,24 +1759,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ieee_cookies = ieee_driver.get_cookies()
             except Exception:
                 ieee_cookies = []
-            try:
-                ieee_driver.quit()
-            except Exception:
-                pass
+        scholar_driver_cookies: list[dict[str, Any]] = []
         if scholar_driver is not None:
             try:
-                scholar_cookies = scholar_driver.get_cookies()
+                scholar_driver_cookies = scholar_driver.get_cookies()
             except Exception:
-                scholar_cookies = []
-            try:
-                scholar_driver.quit()
-            except Exception:
-                pass
+                scholar_driver_cookies = []
+        scholar_cookies = merge_cookie_dicts(
+            scholar_session_cookies,
+            scholar_driver_cookies,
+        )
+        if not matches:
+            if ieee_driver is not None:
+                try:
+                    ieee_driver.quit()
+                except Exception:
+                    pass
+            if scholar_driver is not None:
+                try:
+                    scholar_driver.quit()
+                except Exception:
+                    pass
 
     print(f"[INFO] PDF links found: {len(matches)} / {len(papers)}")
     if not matches:
         print("[INFO] Done.")
         return 0
+
+    has_ieee_matches = any(strip_orcid_prefix(item.source) == "ieee" for item in matches)
+    if has_ieee_matches and ieee_driver is not None and not ieee_headless:
+        manual_checkpoint(
+            "IEEE matches found. If access/login is required for PDF download, "
+            "complete it now, then continue."
+        )
+        try:
+            ieee_cookies = ieee_driver.get_cookies()
+        except Exception:
+            pass
 
     if workers == 1:
         for result in matches:
@@ -1461,6 +1827,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     future.result()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[ERROR] Parallel download crashed for '{query}': {exc}")
+
+    if ieee_driver is not None:
+        try:
+            ieee_driver.quit()
+        except Exception:
+            pass
+    if scholar_driver is not None:
+        try:
+            scholar_driver.quit()
+        except Exception:
+            pass
 
     print("[INFO] Done.")
     return 0

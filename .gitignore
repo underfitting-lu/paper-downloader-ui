@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.browser-profile/
 downloads/
 _tmp_*/
 build/
