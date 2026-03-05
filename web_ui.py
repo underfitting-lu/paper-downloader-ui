@@ -238,6 +238,54 @@ def index() -> str:
       color: var(--ink-700);
       letter-spacing: 0.02em;
     }
+    .label-with-tip {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: auto;
+    }
+    .hint-tip {
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(19, 42, 78, 0.22);
+      background: rgba(242, 247, 255, 0.76);
+      color: #254b84;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 16px;
+      text-align: center;
+      cursor: help;
+      user-select: none;
+    }
+    .tip-bubble {
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 0;
+      width: 260px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.44);
+      background: rgba(19, 28, 44, 0.88);
+      color: #eaf1ff;
+      font-size: 12px;
+      line-height: 1.45;
+      letter-spacing: 0;
+      box-shadow: 0 12px 24px rgba(8, 12, 20, 0.34);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translateY(-4px);
+      transition: opacity 140ms ease, transform 140ms ease;
+      z-index: 5;
+    }
+    .label-with-tip:hover .tip-bubble,
+    .label-with-tip:focus-within .tip-bubble {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
     input[type="text"],
     input[type="number"],
     select,
@@ -444,7 +492,10 @@ def index() -> str:
           <label>并发</label>
           <input id="workers" type="number" min="1" max="16" value="4" />
 
-          <label>阈值</label>
+          <label class="label-with-tip">阈值
+            <span class="hint-tip" tabindex="0" title="阈值说明">?</span>
+            <span class="tip-bubble">阈值是最低匹配分数（0~1）。越高越严格，误匹配更少；越低越宽松，但可能下载到不相关论文。</span>
+          </label>
           <input id="minScore" type="number" min="0" max="1" step="0.05" value="0.55" />
         </div>
 
