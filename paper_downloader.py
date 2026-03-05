@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Download papers by title from arXiv, IEEE Xplore, and major publisher sites.
+Download papers by title from arXiv, IEEE Xplore, Google Scholar portal search,
+and major publisher sites.
 
 Priority order is fixed:
 1) arXiv
 2) IEEE
-3) Major publisher fallback (ACM/Springer/Elsevier/Wiley/Nature via DOI landing page)
+3) Google Scholar + portal filters (Elsevier/ACS/CNS)
+4) ORCID works lookup
+5) Major publisher fallback (ACM/Springer/Elsevier/Wiley/Nature via DOI landing page)
 """
 
 from __future__ import annotations
@@ -47,16 +50,32 @@ IEEE_SEARCH_URL_TEMPLATE = (
     "https://ieeexplore.ieee.org/search/searchresult.jsp?newsearch=true&queryText={query}"
 )
 CROSSREF_API_URL = "https://api.crossref.org/works"
+ORCID_EXPANDED_SEARCH_URL = "https://pub.orcid.org/v3.0/expanded-search/"
+ORCID_WORKS_URL_TEMPLATE = "https://pub.orcid.org/v3.0/{orcid_id}/works"
+SCHOLAR_BASE_URL = "https://scholar.google.com"
+SCHOLAR_SEARCH_URL_TEMPLATE = "https://scholar.google.com/scholar?q={query}"
 
 MAJOR_DOMAIN_LABELS = (
     ("dl.acm.org", "acm"),
     ("link.springer.com", "springer"),
     ("sciencedirect.com", "elsevier"),
+    ("pubs.acs.org", "acs"),
+    ("science.org", "science"),
+    ("sciencemag.org", "science"),
+    ("cell.com", "cell"),
     ("onlinelibrary.wiley.com", "wiley"),
     ("nature.com", "nature"),
     ("tandfonline.com", "taylor-francis"),
     ("journals.sagepub.com", "sage"),
     ("ieeexplore.ieee.org", "ieee"),
+)
+
+PORTAL_FILTERS = (
+    ("elsevier", "sciencedirect.com"),
+    ("acs", "pubs.acs.org"),
+    ("cns-nature", "nature.com"),
+    ("cns-science", "science.org"),
+    ("cns-cell", "cell.com"),
 )
 
 CITATION_CHAIN_INSERT_BREAK_RE = re.compile(
@@ -71,6 +90,7 @@ PERIOD_AUTHOR_BREAK_RE = re.compile(
 NUMBERED_ITEM_BREAK_RE = re.compile(r"\s+(?=(?:\d+\s*[\).、]))")
 REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+\]|\(\d+\)|\d+\s*[\).、]|[-*•▪●])\s*")
 LIST_SPLIT_RE = re.compile(r"(?:\n+|[;；|]+)")
+ORCID_ID_RE = re.compile(r"\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -111,7 +131,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     default_env = Path(__file__).resolve().parent / ".env"
     parser = argparse.ArgumentParser(
         description=(
-            "Download papers from arXiv/IEEE/major publisher sites using paper names."
+            "Download papers from arXiv/IEEE/Scholar/ORCID/major sites using paper names."
         )
     )
     parser.add_argument(
@@ -135,7 +155,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--source",
-        choices=["arxiv", "ieee", "major", "both"],
+        choices=["arxiv", "ieee", "scholar", "orcid", "major", "both"],
         help="Source mode (default from PAPER_SOURCE/both).",
     )
     parser.add_argument(
@@ -153,6 +173,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--major-max-results",
         type=int,
         help="How many Crossref candidates to evaluate per query.",
+    )
+    parser.add_argument(
+        "--orcid-max-profiles",
+        type=int,
+        help="How many ORCID profiles to evaluate per query.",
+    )
+    parser.add_argument(
+        "--orcid-max-works",
+        type=int,
+        help="Max works to scan per ORCID profile.",
     )
     parser.add_argument(
         "--timeout",
@@ -178,6 +208,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--ieee-wait",
         type=int,
         help="Seconds to wait for IEEE pages to render.",
+    )
+    parser.add_argument(
+        "--scholar-headless",
+        action="store_true",
+        help="Run Google Scholar browser headless.",
+    )
+    parser.add_argument(
+        "--scholar-manual-login",
+        action="store_true",
+        help="Pause for manual Scholar/portal login or CAPTCHA before searching.",
+    )
+    parser.add_argument(
+        "--scholar-wait",
+        type=int,
+        help="Seconds to wait for Scholar pages to render.",
     )
     return parser.parse_args(argv)
 
@@ -392,14 +437,29 @@ def build_ieee_driver(headless: bool, user_agent: str) -> Any:
 
 def manual_checkpoint(message: str) -> None:
     print(message)
-    input("Press Enter to continue...")
+    try:
+        if sys.stdin is not None and sys.stdin.isatty():
+            input("Press Enter to continue...")
+            return
+    except Exception:
+        pass
+
+    wait_seconds = parse_int_env("MANUAL_LOGIN_WAIT_SECONDS", default=120, minimum=5)
+    print(
+        "[INFO] Non-interactive mode detected. "
+        f"Waiting {wait_seconds}s for manual login to complete."
+    )
+    time.sleep(wait_seconds)
 
 
 def maybe_manual_ieee_login(driver: Any, enabled: bool) -> None:
     if not enabled:
         return
     driver.get(IEEE_BASE_URL)
-    manual_checkpoint("Complete IEEE login/CAPTCHA in the browser window.")
+    manual_checkpoint(
+        "Complete IEEE login/CAPTCHA in the browser window. "
+        "No next request will be sent until this checkpoint finishes."
+    )
 
 
 def first_matching_href(driver: Any, selectors: Sequence[str]) -> str | None:
@@ -615,6 +675,33 @@ def extract_major_pdf_url(html: str, base_url: str, doi: str) -> str | None:
     return ranked[0][0]
 
 
+def resolve_pdf_from_landing(
+    session: requests.Session,
+    landing_url: str,
+    doi: str,
+    timeout: int,
+) -> tuple[str, str] | None:
+    try:
+        landing_resp = session.get(landing_url, timeout=timeout, allow_redirects=True)
+        landing_resp.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    if is_pdf_response(landing_resp):
+        source_label = identify_major_source(landing_url, landing_resp.url)
+        return landing_resp.url, source_label
+
+    content_type = landing_resp.headers.get("Content-Type", "").lower()
+    if "html" not in content_type and "<html" not in landing_resp.text[:400].lower():
+        return None
+
+    pdf_url = extract_major_pdf_url(landing_resp.text, landing_resp.url, doi)
+    if not pdf_url:
+        return None
+    source_label = identify_major_source(landing_resp.url, pdf_url)
+    return pdf_url, source_label
+
+
 def search_major_sites(
     session: requests.Session,
     query: str,
@@ -639,37 +726,253 @@ def search_major_sites(
         score = float(candidate["score"])
         if score < min_score:
             continue
-        try:
-            landing_resp = session.get(landing_url, timeout=timeout, allow_redirects=True)
-            landing_resp.raise_for_status()
-        except requests.RequestException:
+        resolved = resolve_pdf_from_landing(session, landing_url, doi=doi, timeout=timeout)
+        if not resolved:
             continue
-
-        if is_pdf_response(landing_resp):
-            source_label = identify_major_source(landing_url, landing_resp.url)
-            return SearchResult(
-                source=source_label,
-                query=query,
-                title=title,
-                pdf_url=landing_resp.url,
-                score=score,
-            )
-
-        content_type = landing_resp.headers.get("Content-Type", "").lower()
-        if "html" not in content_type and "<html" not in landing_resp.text[:400].lower():
-            continue
-
-        pdf_url = extract_major_pdf_url(landing_resp.text, landing_resp.url, doi)
-        if not pdf_url:
-            continue
-
-        source_label = identify_major_source(landing_resp.url, pdf_url)
+        pdf_url, source_label = resolved
         return SearchResult(
             source=source_label,
             query=query,
             title=title,
             pdf_url=pdf_url,
             score=score,
+        )
+    return None
+
+
+def parse_orcid_profile_ids(payload: dict[str, Any]) -> list[str]:
+    raw_results = payload.get("expanded-result") or []
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_results:
+        orcid_id = normalize_whitespace(str(item.get("orcid-id", "")))
+        if not orcid_id:
+            continue
+        if not ORCID_ID_RE.search(orcid_id):
+            continue
+        if orcid_id not in seen:
+            seen.add(orcid_id)
+            ids.append(orcid_id)
+    return ids
+
+
+def extract_doi_from_external_ids(external_ids_payload: Any) -> str | None:
+    if not isinstance(external_ids_payload, dict):
+        return None
+    external_ids = external_ids_payload.get("external-id") or []
+    if not isinstance(external_ids, list):
+        return None
+
+    for external_id in external_ids:
+        if not isinstance(external_id, dict):
+            continue
+        external_type = normalize_whitespace(
+            str(external_id.get("external-id-type", ""))
+        ).lower()
+        if external_type != "doi":
+            continue
+        raw_value = normalize_whitespace(str(external_id.get("external-id-value", "")))
+        if not raw_value:
+            normalized_payload = external_id.get("external-id-normalized") or {}
+            raw_value = normalize_whitespace(str(normalized_payload.get("value", "")))
+        if raw_value:
+            return raw_value
+    return None
+
+
+def search_orcid(
+    session: requests.Session,
+    query: str,
+    timeout: int,
+    min_score: float,
+    max_profiles: int,
+    max_works_per_profile: int,
+) -> SearchResult | None:
+    safe_query = query.replace('"', " ").strip()
+    if not safe_query:
+        return None
+
+    params = {
+        "q": f'work-titles:"{safe_query}"',
+        "start": 0,
+        "rows": max_profiles,
+    }
+    response = session.get(ORCID_EXPANDED_SEARCH_URL, params=params, timeout=timeout)
+    response.raise_for_status()
+    profile_ids = parse_orcid_profile_ids(response.json())
+    if not profile_ids:
+        return None
+
+    for orcid_id in profile_ids[:max_profiles]:
+        works_url = ORCID_WORKS_URL_TEMPLATE.format(orcid_id=orcid_id)
+        try:
+            works_resp = session.get(works_url, timeout=timeout)
+            works_resp.raise_for_status()
+        except requests.RequestException:
+            continue
+
+        works_payload = works_resp.json()
+        groups = works_payload.get("group") or []
+        checked = 0
+        for group in groups:
+            summaries = group.get("work-summary") or []
+            for summary in summaries:
+                checked += 1
+                if checked > max_works_per_profile:
+                    break
+
+                title_payload = summary.get("title") or {}
+                title = normalize_whitespace(
+                    str((title_payload.get("title") or {}).get("value", ""))
+                )
+                if not title:
+                    continue
+
+                score = match_score(query, title)
+                if score < min_score:
+                    continue
+
+                doi = extract_doi_from_external_ids(summary.get("external-ids"))
+                summary_url = normalize_whitespace(
+                    str((summary.get("url") or {}).get("value", ""))
+                )
+                landing_candidates: list[str] = []
+                if doi:
+                    landing_candidates.append(f"https://doi.org/{doi}")
+                if summary_url:
+                    landing_candidates.append(summary_url)
+
+                for landing_url in landing_candidates:
+                    resolved = resolve_pdf_from_landing(
+                        session, landing_url, doi=doi or "", timeout=timeout
+                    )
+                    if not resolved:
+                        continue
+                    pdf_url, source_label = resolved
+                    return SearchResult(
+                        source=f"orcid-{source_label}",
+                        query=query,
+                        title=title,
+                        pdf_url=pdf_url,
+                        score=score,
+                    )
+            if checked > max_works_per_profile:
+                break
+    return None
+
+
+def build_scholar_driver(headless: bool, user_agent: str) -> Any:
+    if not SELENIUM_AVAILABLE:
+        raise RuntimeError("selenium is not available. Install requirements.txt first.")
+
+    options = ChromeOptions()
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1400,1200")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    if user_agent:
+        options.add_argument(f"--user-agent={user_agent}")
+    if headless:
+        options.add_argument("--headless=new")
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(90)
+    return driver
+
+
+def maybe_manual_scholar_login(driver: Any, enabled: bool) -> None:
+    if not enabled:
+        return
+    driver.get(SCHOLAR_BASE_URL)
+    manual_checkpoint(
+        "Complete Scholar/portal login or CAPTCHA, then press Enter to continue. "
+        "No navigation will happen until you press Enter."
+    )
+
+
+def search_google_scholar(
+    session: requests.Session,
+    driver: Any,
+    query: str,
+    wait_seconds: int,
+    timeout: int,
+    min_score: float,
+    domain_filter: str | None,
+    source_label: str,
+) -> SearchResult | None:
+    search_query = query if not domain_filter else f"{query} site:{domain_filter}"
+    search_url = SCHOLAR_SEARCH_URL_TEMPLATE.format(query=quote_plus(search_query))
+    driver.get(search_url)
+    time.sleep(max(2, wait_seconds))
+
+    page_title = (driver.title or "").lower()
+    if "not a robot" in page_title or "unusual traffic" in page_title:
+        print("[WARN] Google Scholar requires verification. Try --scholar-manual-login.")
+        return None
+
+    results = driver.find_elements(By.CSS_SELECTOR, "div.gs_r.gs_or.gs_scl")
+    candidates: list[dict[str, Any]] = []
+    for result in results:
+        title_els = result.find_elements(By.CSS_SELECTOR, "h3.gs_rt")
+        if not title_els:
+            continue
+        title_el = title_els[0]
+        title = normalize_whitespace(title_el.text or "")
+        if not title:
+            continue
+
+        link_els = title_el.find_elements(By.CSS_SELECTOR, "a")
+        article_url = ""
+        if link_els:
+            article_url = normalize_whitespace(link_els[0].get_attribute("href") or "")
+
+        pdf_url = ""
+        pdf_els = result.find_elements(By.CSS_SELECTOR, "div.gs_or_ggsm a")
+        if pdf_els:
+            pdf_url = normalize_whitespace(pdf_els[0].get_attribute("href") or "")
+
+        combined_targets = " ".join([article_url, pdf_url]).lower()
+        if domain_filter and domain_filter.lower() not in combined_targets:
+            continue
+
+        score = match_score(query, title)
+        if score < min_score:
+            continue
+        candidates.append(
+            {
+                "title": title,
+                "article_url": article_url,
+                "pdf_url": pdf_url,
+                "score": score,
+            }
+        )
+
+    candidates.sort(key=lambda item: float(item["score"]), reverse=True)
+    for candidate in candidates:
+        if candidate["pdf_url"]:
+            return SearchResult(
+                source=source_label,
+                query=query,
+                title=str(candidate["title"]),
+                pdf_url=str(candidate["pdf_url"]),
+                score=float(candidate["score"]),
+            )
+
+        article_url = str(candidate["article_url"])
+        if not article_url:
+            continue
+        resolved = resolve_pdf_from_landing(session, article_url, doi="", timeout=timeout)
+        if not resolved:
+            continue
+        pdf_url, _ = resolved
+        return SearchResult(
+            source=source_label,
+            query=query,
+            title=str(candidate["title"]),
+            pdf_url=pdf_url,
+            score=float(candidate["score"]),
         )
     return None
 
@@ -688,12 +991,33 @@ def add_cookies_to_session(session: requests.Session, cookies: list[dict[str, An
             session.cookies.set(name, value, path=path)
 
 
+def strip_orcid_prefix(source: str) -> str:
+    if source.startswith("orcid-"):
+        return source[len("orcid-") :]
+    return source
+
+
+def uses_scholar_cookies(source: str) -> bool:
+    base = strip_orcid_prefix(source)
+    if base in {
+        "scholar",
+        "elsevier",
+        "acs",
+        "cns-nature",
+        "cns-science",
+        "cns-cell",
+    }:
+        return True
+    return source.startswith("orcid-") and base in {"elsevier", "acs", "science", "cell", "nature"}
+
+
 def download_one(
     result: SearchResult,
     download_dir: Path,
     timeout: int,
     user_agents: dict[str, str],
     ieee_cookies: list[dict[str, Any]],
+    scholar_cookies: list[dict[str, Any]],
 ) -> bool:
     output_path = unique_output_path(download_dir, result.title)
     session = requests.Session()
@@ -703,9 +1027,12 @@ def download_one(
             "Accept": "application/pdf,application/octet-stream,*/*;q=0.8",
         }
     )
-    if result.source == "ieee":
+    if strip_orcid_prefix(result.source) == "ieee":
         session.headers["Referer"] = IEEE_BASE_URL
         add_cookies_to_session(session, ieee_cookies)
+    elif uses_scholar_cookies(result.source):
+        session.headers["Referer"] = SCHOLAR_BASE_URL
+        add_cookies_to_session(session, scholar_cookies)
 
     try:
         response = session.get(
@@ -773,17 +1100,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     source = (args.source or _env("PAPER_SOURCE", "both")).strip().lower()
-    if source not in {"arxiv", "ieee", "major", "both"}:
-        print("[ERROR] Invalid source. Use arxiv, ieee, major, or both.")
+    if source not in {"arxiv", "ieee", "scholar", "orcid", "major", "both"}:
+        print("[ERROR] Invalid source. Use arxiv, ieee, scholar, orcid, major, or both.")
         return 1
 
     use_arxiv = source in {"arxiv", "both"}
     use_ieee = source in {"ieee", "both"}
+    use_scholar = source in {"scholar", "both"}
+    use_orcid = source in {"orcid", "both"}
     use_major = source in {"major", "both"}
 
     max_results = args.max_results or parse_int_env("ARXIV_MAX_RESULTS", default=8)
     major_max_results = args.major_max_results or parse_int_env(
         "MAJOR_MAX_RESULTS", default=8
+    )
+    orcid_max_profiles = args.orcid_max_profiles or parse_int_env(
+        "ORCID_MAX_PROFILES", default=5
+    )
+    orcid_max_works = args.orcid_max_works or parse_int_env(
+        "ORCID_MAX_WORKS_PER_PROFILE", default=120
     )
     timeout = args.timeout or parse_int_env("ARXIV_TIMEOUT_SECONDS", default=30)
     min_score = (
@@ -796,19 +1131,41 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     arxiv_user_agent = _env("ARXIV_USER_AGENT", default_arxiv_user_agent())
     ieee_user_agent = _env("IEEE_USER_AGENT", default_browser_user_agent())
+    scholar_user_agent = _env("SCHOLAR_USER_AGENT", default_browser_user_agent())
     major_user_agent = _env("MAJOR_USER_AGENT", default_browser_user_agent())
+    orcid_user_agent = _env("ORCID_USER_AGENT", default_arxiv_user_agent())
     user_agents = {
         "default": major_user_agent,
         "arxiv": arxiv_user_agent,
         "ieee": ieee_user_agent,
+        "scholar": scholar_user_agent,
         "major": major_user_agent,
         "acm": major_user_agent,
         "springer": major_user_agent,
         "elsevier": major_user_agent,
+        "acs": major_user_agent,
+        "science": major_user_agent,
+        "cell": major_user_agent,
         "wiley": major_user_agent,
         "nature": major_user_agent,
         "taylor-francis": major_user_agent,
         "sage": major_user_agent,
+        "cns-nature": major_user_agent,
+        "cns-science": major_user_agent,
+        "cns-cell": major_user_agent,
+        "orcid-scholar": scholar_user_agent,
+        "orcid-major": major_user_agent,
+        "orcid-acm": major_user_agent,
+        "orcid-springer": major_user_agent,
+        "orcid-elsevier": major_user_agent,
+        "orcid-acs": major_user_agent,
+        "orcid-science": major_user_agent,
+        "orcid-cell": major_user_agent,
+        "orcid-wiley": major_user_agent,
+        "orcid-nature": major_user_agent,
+        "orcid-taylor-francis": major_user_agent,
+        "orcid-sage": major_user_agent,
+        "orcid-ieee": ieee_user_agent,
     }
 
     ieee_manual_login = args.ieee_manual_login or parse_bool_env("IEEE_MANUAL_LOGIN")
@@ -818,17 +1175,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[WARN] --ieee-manual-login conflicts with headless; disabling headless.")
         ieee_headless = False
 
-    if use_ieee and not SELENIUM_AVAILABLE:
-        if source == "ieee":
-            print("[ERROR] IEEE source requires selenium. Install requirements.txt.")
+    scholar_manual_login = args.scholar_manual_login or parse_bool_env(
+        "SCHOLAR_MANUAL_LOGIN"
+    )
+    scholar_headless = args.scholar_headless or parse_bool_env("SCHOLAR_HEADLESS")
+    scholar_wait = args.scholar_wait or parse_int_env("SCHOLAR_WAIT_SECONDS", default=6)
+    if scholar_manual_login and scholar_headless:
+        print("[WARN] --scholar-manual-login conflicts with headless; disabling headless.")
+        scholar_headless = False
+
+    if (use_ieee or use_scholar) and not SELENIUM_AVAILABLE:
+        if source in {"ieee", "scholar"}:
+            print("[ERROR] IEEE/Scholar source requires selenium. Install requirements.txt.")
             return 1
-        print("[WARN] Selenium unavailable, IEEE source disabled.")
+        print("[WARN] Selenium unavailable, IEEE/Scholar sources disabled.")
         use_ieee = False
+        use_scholar = False
 
     arxiv_session: requests.Session | None = None
+    orcid_session: requests.Session | None = None
+    scholar_session: requests.Session | None = None
     major_session: requests.Session | None = None
     ieee_driver: Any = None
+    scholar_driver: Any = None
     ieee_cookies: list[dict[str, Any]] = []
+    scholar_cookies: list[dict[str, Any]] = []
     matches: list[SearchResult] = []
 
     if use_arxiv:
@@ -849,8 +1220,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         )
 
+    if use_orcid:
+        orcid_session = requests.Session()
+        orcid_session.headers.update(
+            {
+                "User-Agent": orcid_user_agent,
+                "Accept": "application/vnd.orcid+json,application/json,*/*;q=0.8",
+            }
+        )
+
+    if use_scholar:
+        scholar_session = requests.Session()
+        scholar_session.headers.update(
+            {
+                "User-Agent": scholar_user_agent,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+        )
+
     print(f"[INFO] Source mode: {source}")
-    print("[INFO] Priority: arXiv -> IEEE -> major sites")
+    print("[INFO] Priority: arXiv -> IEEE -> Scholar/portals -> ORCID -> major sites")
     print(f"[INFO] Download directory: {download_dir.resolve()}")
     print(f"[INFO] Paper count: {len(papers)}")
 
@@ -906,6 +1295,90 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"[WARN] IEEE unavailable in this run, disabling IEEE: {exc}")
                     use_ieee = False
 
+            if not picked and use_scholar:
+                if scholar_driver is None:
+                    try:
+                        scholar_driver = build_scholar_driver(
+                            scholar_headless, scholar_user_agent
+                        )
+                        maybe_manual_scholar_login(
+                            scholar_driver, scholar_manual_login
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        if source == "scholar":
+                            print(f"[ERROR] Failed to initialize/search Scholar: {exc}")
+                            return 1
+                        print(
+                            "[WARN] Scholar unavailable in this run, disabling "
+                            f"Scholar/portal search: {exc}"
+                        )
+                        use_scholar = False
+
+                if use_scholar and scholar_driver is not None and scholar_session is not None:
+                    try:
+                        print(f"[SEARCH][Scholar] {paper}")
+                        picked = search_google_scholar(
+                            session=scholar_session,
+                            driver=scholar_driver,
+                            query=paper,
+                            wait_seconds=scholar_wait,
+                            timeout=timeout,
+                            min_score=min_score,
+                            domain_filter=None,
+                            source_label="scholar",
+                        )
+                        if picked:
+                            print(f"[MATCH][Scholar] {paper} -> {picked.title}")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[ERROR] Scholar search failed for '{paper}': {exc}")
+
+            if (
+                not picked
+                and use_scholar
+                and scholar_driver is not None
+                and scholar_session is not None
+            ):
+                for portal_label, portal_domain in PORTAL_FILTERS:
+                    print(f"[SEARCH][Portal:{portal_label}] {paper}")
+                    try:
+                        picked = search_google_scholar(
+                            session=scholar_session,
+                            driver=scholar_driver,
+                            query=paper,
+                            wait_seconds=scholar_wait,
+                            timeout=timeout,
+                            min_score=min_score,
+                            domain_filter=portal_domain,
+                            source_label=portal_label,
+                        )
+                        if picked:
+                            print(
+                                f"[MATCH][Portal:{portal_label}] "
+                                f"{paper} -> {picked.title}"
+                            )
+                            break
+                    except Exception as exc:  # noqa: BLE001
+                        print(
+                            f"[ERROR] Portal search failed for '{paper}' "
+                            f"({portal_label}): {exc}"
+                        )
+
+            if not picked and use_orcid and orcid_session is not None:
+                print(f"[SEARCH][ORCID] {paper}")
+                try:
+                    picked = search_orcid(
+                        session=orcid_session,
+                        query=paper,
+                        timeout=timeout,
+                        min_score=min_score,
+                        max_profiles=orcid_max_profiles,
+                        max_works_per_profile=orcid_max_works,
+                    )
+                    if picked:
+                        print(f"[MATCH][ORCID:{picked.source}] {paper} -> {picked.title}")
+                except requests.RequestException as exc:
+                    print(f"[ERROR] ORCID search failed for '{paper}': {exc}")
+
             if not picked and use_major and major_session is not None:
                 print(f"[SEARCH][Major] {paper}")
                 try:
@@ -928,6 +1401,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         if arxiv_session is not None:
             arxiv_session.close()
+        if orcid_session is not None:
+            orcid_session.close()
+        if scholar_session is not None:
+            scholar_session.close()
         if major_session is not None:
             major_session.close()
         if ieee_driver is not None:
@@ -937,6 +1414,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ieee_cookies = []
             try:
                 ieee_driver.quit()
+            except Exception:
+                pass
+        if scholar_driver is not None:
+            try:
+                scholar_cookies = scholar_driver.get_cookies()
+            except Exception:
+                scholar_cookies = []
+            try:
+                scholar_driver.quit()
             except Exception:
                 pass
 
@@ -953,6 +1439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout=timeout,
                 user_agents=user_agents,
                 ieee_cookies=ieee_cookies,
+                scholar_cookies=scholar_cookies,
             )
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -964,6 +1451,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     timeout,
                     user_agents,
                     ieee_cookies,
+                    scholar_cookies,
                 ): result.query
                 for result in matches
             }

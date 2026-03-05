@@ -5,7 +5,7 @@ Local Web UI for paper_downloader.py.
 Features:
 - Pick download folder with native dialog.
 - Paste multiple paper titles.
-- Run download job (arXiv -> IEEE -> major sites priority in script).
+- Run download job (arXiv -> IEEE -> Scholar/portals -> ORCID -> major sites).
 """
 
 from __future__ import annotations
@@ -62,6 +62,8 @@ def build_cli_args(
     min_score: float,
     ieee_manual_login: bool,
     ieee_headless: bool,
+    scholar_manual_login: bool,
+    scholar_headless: bool,
 ) -> list[str]:
     cli_args = [
         "--papers-file",
@@ -79,6 +81,10 @@ def build_cli_args(
         cli_args.append("--ieee-manual-login")
     if ieee_headless:
         cli_args.append("--ieee-headless")
+    if scholar_manual_login:
+        cli_args.append("--scholar-manual-login")
+    if scholar_headless:
+        cli_args.append("--scholar-headless")
     return cli_args
 
 
@@ -371,6 +377,7 @@ def index() -> str:
     }
     .checks {
       display: flex;
+      flex-wrap: wrap;
       gap: 18px;
       font-size: 14px;
       color: var(--ink-700);
@@ -468,7 +475,7 @@ def index() -> str:
       <div class="hero">
         <p class="eyebrow">Ink Glass Workflow</p>
         <h1>论文批量下载器</h1>
-        <p class="muted">从混乱引用到整洁本地 PDF：支持整段粘贴、自动解析和多源下载，优先级固定为 <strong>arXiv -> IEEE -> major sites</strong>。</p>
+        <p class="muted">从混乱引用到整洁本地 PDF：支持整段粘贴、自动解析和多源下载，优先级固定为 <strong>arXiv -> IEEE -> Scholar/门户(Elsevier/ACS/CNS) -> ORCID -> major sites</strong>。</p>
       </div>
 
       <div class="meta-panel">
@@ -486,6 +493,8 @@ def index() -> str:
             <option value="both">both (推荐)</option>
             <option value="arxiv">arxiv</option>
             <option value="ieee">ieee</option>
+            <option value="scholar">scholar</option>
+            <option value="orcid">orcid</option>
             <option value="major">major</option>
           </select>
 
@@ -502,12 +511,14 @@ def index() -> str:
         <div class="checks">
           <label><input id="ieeeManualLogin" type="checkbox" /> IEEE 手动登录/验证码</label>
           <label><input id="ieeeHeadless" type="checkbox" /> IEEE 无头模式</label>
+          <label><input id="scholarManualLogin" type="checkbox" /> Scholar/门户手动登录</label>
+          <label><input id="scholarHeadless" type="checkbox" /> Scholar 无头模式</label>
         </div>
       </div>
 
       <div class="field">
         <label>论文输入</label>
-        <textarea id="paperTitles" class="grow" placeholder="可一行一个，也可整段粘贴（例如 Liu et al., 2023 Wang et al., 2022）"></textarea>
+        <textarea id="paperTitles" class="grow" placeholder="建议尽量粘贴完整论文标题，可显著提升匹配准确率。支持一行一个，也支持整段引用粘贴（例如 Liu et al., 2023 Wang et al., 2022）。"></textarea>
       </div>
 
       <div class="actions">
@@ -612,6 +623,8 @@ def index() -> str:
         min_score: Number(document.getElementById("minScore").value || 0.55),
         ieee_manual_login: document.getElementById("ieeeManualLogin").checked,
         ieee_headless: document.getElementById("ieeeHeadless").checked,
+        scholar_manual_login: document.getElementById("scholarManualLogin").checked,
+        scholar_headless: document.getElementById("scholarHeadless").checked,
         paper_titles: document.getElementById("paperTitles").value
       };
 
@@ -669,7 +682,7 @@ def download() -> Any:
         return jsonify({"ok": False, "error": "Please choose a download folder.", "exit_code": 1}), 400
 
     source = str(payload.get("source", "both")).strip().lower()
-    if source not in {"arxiv", "ieee", "major", "both"}:
+    if source not in {"arxiv", "ieee", "scholar", "orcid", "major", "both"}:
         source = "both"
 
     try:
@@ -685,6 +698,8 @@ def download() -> Any:
 
     ieee_manual_login = bool(payload.get("ieee_manual_login", False))
     ieee_headless = bool(payload.get("ieee_headless", False))
+    scholar_manual_login = bool(payload.get("scholar_manual_login", False))
+    scholar_headless = bool(payload.get("scholar_headless", False))
 
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".txt", delete=False
@@ -701,6 +716,8 @@ def download() -> Any:
         min_score=min_score,
         ieee_manual_login=ieee_manual_login,
         ieee_headless=ieee_headless,
+        scholar_manual_login=scholar_manual_login,
+        scholar_headless=scholar_headless,
     )
 
     try:

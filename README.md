@@ -16,7 +16,9 @@ The input parser supports both one-line-per-title and messy pasted blocks (for e
 Search priority is fixed:
 1. arXiv (first)
 2. IEEE
-3. major publisher fallback (ACM/Springer/Elsevier/Wiley/Nature, etc.)
+3. Google Scholar + portal filters (Elsevier / ACS / CNS)
+4. ORCID works lookup
+5. major publisher fallback (ACM/Springer/Elsevier/Wiley/Nature, etc.)
 
 Filename rule:
 - use matched real title
@@ -60,12 +62,21 @@ How to use:
 
 ## UI Options
 
-- source: `both` / `arxiv` / `ieee` / `major`
+- source: `both` / `arxiv` / `ieee` / `scholar` / `orcid` / `major`
 - workers: parallel downloads
 - min score: title match threshold (0-1, larger is stricter)
 - IEEE manual login: use when CAPTCHA/login is required
 - IEEE headless: run IEEE browser in background
+- Scholar manual login: wait for you to finish Scholar/portal login before continuing
+- Scholar headless: run Scholar browser in background
 - input parser supports:
   - one title per line
   - numbered lists like `1) ... 2) ...`
   - pasted citation chains like `Liu et al., 2023 Wang et al., 2022`
+  - recommendation: use full paper titles for highest hit accuracy
+
+## Login Behavior (Important)
+
+- IEEE and Scholar/portal manual login are done once per run (session reused), so it will not keep re-opening login for every paper.
+- In terminal mode, it waits for your Enter confirmation after login.
+- In non-interactive mode (for example packaged app without stdin), it uses `MANUAL_LOGIN_WAIT_SECONDS` from `.env` before sending the next request.
